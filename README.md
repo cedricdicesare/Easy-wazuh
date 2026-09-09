@@ -238,6 +238,31 @@ These internal names are Docker service names inside the generated compose stack
 
 If certificates already exist under `/opt/wazuh/wazuh-docker/<single-node-or-multi-node>/config/wazuh_indexer_ssl_certs`, the script keeps them only when they match the selected dashboard host metadata. If you change the dashboard FQDN/IP between runs, move the existing certificate directory away before generating new certificates.
 
+## Custom TLS certificates
+
+The bootstrap creates the initial Wazuh certificates with the official Wazuh certificate tooling. Browsers can warn on these self-signed certificates until the issuing CA is trusted by the client workstation.
+
+Use `certificate-installer.sh` after bootstrap when an administrator already has a third-party PEM certificate and private key, such as a wildcard certificate, an internal PKI certificate, a public CA certificate, or a certificate dedicated to the Wazuh service. The script installs certificates only on exposed HTTPS endpoints:
+
+```text
+Dashboard HTTPS  https://<wazuh-fqdn>:443
+Wazuh API        https://<wazuh-fqdn>:55000  optional, explicit choice only
+```
+
+`wazuh-certs-tool.sh` remains the Wazuh PKI generation tool. `certificate-installer.sh` is only an installer for existing third-party certificates on exposed endpoints. It does not replace `root-ca.pem`, indexer certificates, Filebeat certificates, manager-to-indexer certificates, cluster certificates, or internal OpenSearch TLS material.
+
+The installer validates the certificate, private key, expiration, certificate/key match, SAN coverage, wildcard coverage, and IP SANs before changing files. For the API, it also checks the public endpoint and internal names used by Dashboard or orchestrator API clients before any backup or modification. Passphrase-protected private keys and `.p12`/`.pfx` files are refused in V1; export certificate/fullchain and key as PEM first.
+
+Before replacement, backups are written under:
+
+```text
+/opt/wazuh/backups/certificates/YYYYMMDD-HHMMSS/
+```
+
+The script restores previous files and permissions and restarts only the targeted Compose service if installation or TLS verification fails. It never runs Docker volume deletion, stack-wide restart, `docker compose down -v`, or trust-store changes on client workstations.
+
+A certificate signed by an internal PKI removes browser warnings only when that PKI is trusted by the client workstation. If the API certificate is signed by a CA not already known by the orchestrator, update `wazuh_api_ca_file`; do not disable TLS verification.
+
 ## Docker safety checks
 
 The installer is designed to avoid damaging an existing Docker host.
