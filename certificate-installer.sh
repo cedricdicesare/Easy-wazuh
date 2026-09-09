@@ -767,9 +767,9 @@ prompt_certificate_inputs() {
   CERT_INPUT=""
   KEY_INPUT=""
   CHAIN_INPUT=""
-  read -r -p "Certificate / fullchain PEM: " CERT_INPUT
-  read -r -p "Private key PEM: " KEY_INPUT
-  read -r -p "Intermediate chain PEM (optional): " CHAIN_INPUT
+  read -r -p "Path to certificate or fullchain PEM file: " CERT_INPUT
+  read -r -p "Path to private key PEM file: " KEY_INPUT
+  read -r -p "Path to intermediate chain PEM file (optional, press Enter to skip): " CHAIN_INPUT
 }
 
 install_same_certificate() {

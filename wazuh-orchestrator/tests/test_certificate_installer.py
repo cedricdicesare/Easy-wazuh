@@ -22,7 +22,7 @@ def run(cmd: list[str], cwd: Path | None = None, input_text: str | None = None, 
     )
 
 
-def bash(script: str, tmp_path: Path, check: bool = True) -> subprocess.CompletedProcess[str]:
+def bash(script: str, tmp_path: Path, check: bool = True, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
     env = {
         **os.environ,
         "EASY_WAZUH_CERT_INSTALLER_TESTING": "yes",
@@ -32,6 +32,7 @@ def bash(script: str, tmp_path: Path, check: bool = True) -> subprocess.Complete
         ["bash", "-c", f'source "{INSTALLER}"\n{script}'],
         cwd=ROOT,
         env=env,
+        input=input_text,
         check=check,
         text=True,
         stdout=subprocess.PIPE,
@@ -431,3 +432,10 @@ def test_served_certificate_uses_local_connect_host_with_public_sni(tmp_path: Pa
     result = bash(script, tmp_path)
     assert "-connect 127.0.0.1:443" in result.stdout
     assert "-servername wazuh.home.lan" in result.stdout
+
+
+def test_certificate_input_prompts_ask_for_file_paths():
+    text = INSTALLER.read_text(encoding="utf-8")
+    assert "Path to certificate or fullchain PEM file:" in text
+    assert "Path to private key PEM file:" in text
+    assert "Path to intermediate chain PEM file (optional, press Enter to skip):" in text
