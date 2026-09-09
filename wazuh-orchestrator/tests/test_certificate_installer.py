@@ -191,16 +191,14 @@ def test_passphrase_protected_key_is_rejected(tmp_path: Path):
 def test_dashboard_discovery_targets_dashboard_service(tmp_path: Path):
     compose = make_compose(tmp_path)
     result = bash(f'discover_targets "{compose}"', tmp_path)
-    assert "dashboard=wazuh.dashboard" in result.stdout
-    assert "api=wazuh.manager" in result.stdout
+    assert result.stdout.strip() == "dashboard=wazuh.dashboard"
 
 
-def test_multi_node_identifies_exposed_api_manager_only(tmp_path: Path):
+def test_multi_node_identifies_dashboard_service_only(tmp_path: Path):
     compose = make_compose(tmp_path, "multi-node")
     result = bash(f'discover_targets "{compose}"', tmp_path)
-    assert "dashboard=wazuh-dashboard01.home.lan" in result.stdout
-    assert "api=wazuh-manager01.home.lan" in result.stdout
-    assert "wazuh-manager02.home.lan" not in result.stdout
+    assert result.stdout.strip() == "dashboard=wazuh-dashboard01.home.lan"
+    assert "wazuh-manager01.home.lan" not in result.stdout
 
 
 def test_dashboard_update_never_targets_root_ca(tmp_path: Path):
@@ -212,28 +210,6 @@ def test_dashboard_update_never_targets_root_ca(tmp_path: Path):
     bash(script, tmp_path)
     text = INSTALLER.read_text(encoding="utf-8")
     assert "refusing to modify root-ca.pem" in text
-
-
-def test_api_required_names_include_internal_dashboard_api_host(tmp_path: Path):
-    compose = make_compose(tmp_path, "multi-node")
-    result = bash(f'api_required_names "{compose}" wazuh-manager01.home.lan wazuh-dashboard01.home.lan', tmp_path)
-    assert "wazuh.home.lan" in result.stdout
-    assert "wazuh-manager01.home.lan" in result.stdout
-
-
-def test_api_certificate_missing_internal_hostname_refuses_before_backup(tmp_path: Path):
-    compose = make_compose(tmp_path, "multi-node")
-    cert, key = make_cert(tmp_path, "public-only", ["wazuh.home.lan"])
-    script = f'''
-      served_certificate_fingerprint() {{ return 1; }}
-      confirm() {{ echo "confirm should not be called"; return 1; }}
-      create_backup_dir() {{ echo "backup should not be called"; return 1; }}
-      install_api_certificate "{compose}" "{cert}" "{key}" ""
-    '''
-    result = bash(script, tmp_path, check=False)
-    assert result.returncode != 0
-    assert "does not cover all hostnames required" in result.stderr
-    assert not (tmp_path / "backups").exists()
 
 
 def test_backup_created_with_restrictive_permissions(tmp_path: Path):
@@ -333,6 +309,9 @@ def test_static_security_guards():
     assert "chmod 666" not in text
     assert "root-ca.pem" in text
     assert "refusing to modify root-ca.pem" in text
+    assert "Install / replace Wazuh API certificate" not in text
+    assert "Dashboard + API" not in text
+    assert "install_api_certificate" not in text
 
 
 
@@ -396,24 +375,12 @@ def test_unsupported_dashboard_tls_terminator_is_rejected(tmp_path: Path):
     assert "This topology is not supported in V1" in result.stderr
 
 
-def test_same_certificate_preflight_refuses_before_dashboard_install(tmp_path: Path):
-    compose = make_compose(tmp_path, "multi-node")
-    cert, key = make_cert(tmp_path, "public-only", ["wazuh.home.lan"])
-    script = f"""
-      prompt_certificate_inputs() {{ CERT_INPUT="{cert}"; KEY_INPUT="{key}"; CHAIN_INPUT=""; }}
-      install_dashboard_certificate() {{ echo "dashboard install should not happen"; return 1; }}
-      install_api_certificate() {{ echo "api install should not happen"; return 1; }}
-      install_same_certificate "{compose}"
-    """
-    result = bash(script, tmp_path, check=False)
-    assert result.returncode != 0
-    assert "dashboard install should not happen" not in result.stdout
-
-
 def test_static_no_internal_pki_or_filebeat_targets():
     text = INSTALLER.read_text(encoding="utf-8")
     assert "wazuh-indexer" not in text
     assert "filebeat" not in text.lower()
+    assert "55000" not in text
+    assert "api.yaml" not in text
     assert "docker compose down" not in text
     assert "docker volume" not in text
 

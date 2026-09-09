@@ -506,94 +506,6 @@ restore_dashboard_files() {
   restore_permissions_from_metadata "$backup_dir/dashboard/permissions.txt" "private-key.pem" "$key_target"
 }
 
-docker_exec_read_api_yaml() {
-  local compose_file="$1" service="$2"
-  compose_cmd "$compose_file" exec -T "$service" sh -c 'cat /var/ossec/api/configuration/api.yaml'
-}
-
-api_yaml_value() {
-  local key="$1" file="$2"
-  awk -v key="$key" '
-    /^[[:space:]]*#/ { next }
-    $0 ~ "^[[:space:]]*" key ":[[:space:]]*" {
-      sub("^[[:space:]]*" key ":[[:space:]]*", "", $0)
-      gsub(/^"|"$/, "", $0)
-      print $0
-      exit
-    }
-  ' "$file"
-}
-
-api_certificate_paths() {
-  local api_yaml="$1" cert key
-  cert="$(api_yaml_value https_cert "$api_yaml")"
-  key="$(api_yaml_value https_key "$api_yaml")"
-  [ -n "$cert" ] || cert="$(api_yaml_value certificate "$api_yaml")"
-  [ -n "$key" ] || key="$(api_yaml_value key "$api_yaml")"
-  [ -n "$key" ] || key="$(api_yaml_value private_key "$api_yaml")"
-  [ -n "$cert" ] || cert="/var/ossec/api/configuration/ssl/server.crt"
-  [ -n "$key" ] || key="/var/ossec/api/configuration/ssl/server.key"
-  printf '%s\n%s\n' "$cert" "$key"
-}
-
-container_file_fingerprint() {
-  local compose_file="$1" service="$2" path="$3"
-  compose_cmd "$compose_file" exec -T "$service" sh -c "openssl x509 -in \"\$1\" -noout -fingerprint -sha256" sh "$path" |
-    sed 's/^sha256 Fingerprint=//;s/^SHA256 Fingerprint=//'
-}
-
-install_api_files() {
-  local compose_file="$1" service="$2" cert_file="$3" key_file="$4" backup_dir="$5"
-  local api_yaml paths cert_path key_path
-  local cert_perm key_perm cert_owner cert_mode key_owner
-  make_tmp_dir
-  api_yaml="$TMP_DIR/api.yaml"
-  docker_exec_read_api_yaml "$compose_file" "$service" > "$api_yaml"
-  mapfile -t paths < <(api_certificate_paths "$api_yaml")
-  cert_path="${paths[0]}"
-  key_path="${paths[1]}"
-  [[ "$cert_path" != *root-ca* && "$key_path" != *root-ca* ]] || { err "refusing to modify any root CA path."; return 1; }
-
-  mkdir -p "$backup_dir/api"
-  chmod 700 "$backup_dir/api"
-  compose_cmd "$compose_file" exec -T "$service" sh -c 'cat "$1"' sh "$cert_path" > "$backup_dir/api/certificate.pem"
-  compose_cmd "$compose_file" exec -T "$service" sh -c 'cat "$1"' sh "$key_path" > "$backup_dir/api/private-key.pem"
-  chmod 600 "$backup_dir/api/private-key.pem"
-  cp "$api_yaml" "$backup_dir/api/api.yaml"
-  chmod 600 "$backup_dir/api/api.yaml"
-  compose_cmd "$compose_file" exec -T "$service" sh -c 'stat -c "%u:%g %a" "$1"; stat -c "%u:%g %a" "$2"' sh "$cert_path" "$key_path" > "$backup_dir/api/permissions.txt"
-  printf 'certificate_target=%s\nprivate_key_target=%s\nservice=%s\n' "$cert_path" "$key_path" "$service" > "$backup_dir/metadata/api.env"
-  chmod 600 "$backup_dir/metadata/api.env"
-
-  cert_perm="$(sed -n '1p' "$backup_dir/api/permissions.txt")"
-  key_perm="$(sed -n '2p' "$backup_dir/api/permissions.txt")"
-  cert_owner="${cert_perm%% *}"
-  cert_mode="${cert_perm##* }"
-  key_owner="${key_perm%% *}"
-  compose_cmd "$compose_file" cp "$cert_file" "$service:$cert_path"
-  compose_cmd "$compose_file" cp "$key_file" "$service:$key_path"
-  compose_cmd "$compose_file" exec -T "$service" sh -c 'chown "$1" "$2"; chmod "$3" "$2"; chown "$4" "$5"; chmod 600 "$5"' sh "$cert_owner" "$cert_path" "$cert_mode" "$key_owner" "$key_path"
-}
-
-restore_api_files() {
-  local compose_file="$1" backup_dir="$2"
-  local meta cert_target key_target service
-  local cert_perm key_perm cert_owner cert_mode key_owner
-  meta="$backup_dir/metadata/api.env"
-  [ -f "$meta" ] || { err "API backup metadata not found."; return 1; }
-  cert_target="$(sed -n 's/^certificate_target=//p' "$meta")"
-  key_target="$(sed -n 's/^private_key_target=//p' "$meta")"
-  service="$(sed -n 's/^service=//p' "$meta")"
-  cert_perm="$(sed -n '1p' "$backup_dir/api/permissions.txt")"
-  key_perm="$(sed -n '2p' "$backup_dir/api/permissions.txt")"
-  cert_owner="${cert_perm%% *}"
-  cert_mode="${cert_perm##* }"
-  key_owner="${key_perm%% *}"
-  compose_cmd "$compose_file" cp "$backup_dir/api/certificate.pem" "$service:$cert_target"
-  compose_cmd "$compose_file" cp "$backup_dir/api/private-key.pem" "$service:$key_target"
-  compose_cmd "$compose_file" exec -T "$service" sh -c 'chown "$1" "$2"; chmod "$3" "$2"; chown "$4" "$5"; chmod 600 "$5"' sh "$cert_owner" "$cert_target" "$cert_mode" "$key_owner" "$key_target"
-}
-
 restart_target() {
   local compose_file="$1" service="$2"
   is_safe_service_name "$service" || { err "unsafe service name: $service"; return 1; }
@@ -643,31 +555,8 @@ dashboard_required_names() {
   discover_public_endpoint "$compose_file"
 }
 
-api_required_names() {
-  local compose_file="$1" api_service="$2" dashboard_service="$3" public_endpoint api_url orch_url host
-  public_endpoint="$(discover_public_endpoint "$compose_file")"
-  printf '%s\n' "$public_endpoint"
-  api_url="$(compose_environment_value "$compose_file" "$dashboard_service" "WAZUH_API_URL")"
-  if [ -n "$api_url" ]; then
-    host="${api_url#https://}"
-    host="${host#http://}"
-    host="${host%%:*}"
-    printf '%s\n' "$host"
-  fi
-  if [ -f "$(compose_project_dir "$compose_file")/../wazuh-orchestrator/config/orchestrator.yaml" ]; then
-    orch_url="$(sed -n 's/^[[:space:]]*wazuh_api_url:[[:space:]]*//p' "$(compose_project_dir "$compose_file")/../wazuh-orchestrator/config/orchestrator.yaml" | head -n 1)"
-    if [ -n "$orch_url" ] && [ "$orch_url" != "null" ]; then
-      host="${orch_url#https://}"
-      host="${host#http://}"
-      host="${host%%:*}"
-      printf '%s\n' "$host"
-    fi
-  fi
-  printf '%s\n' "$api_service"
-}
-
 discover_targets() {
-  local compose_file="$1" dashboard_service api_service port443_service
+  local compose_file="$1" dashboard_service port443_service
   port443_service="$(find_service_for_host_port "$compose_file" 443 || true)"
   [ -n "$port443_service" ] || { err "no Compose service publishes host port 443."; return 1; }
   if service_image_contains "$compose_file" "$port443_service" "wazuh-dashboard"; then
@@ -676,12 +565,9 @@ discover_targets() {
     err "host port 443 is published by $port443_service, not by Wazuh Dashboard. This topology is not supported in V1."
     return 1
   fi
-  api_service="$(find_service_for_host_port "$compose_file" 55000 || true)"
-  [ -n "$api_service" ] || { err "no Compose service publishes host port 55000."; return 1; }
-  service_image_contains "$compose_file" "$api_service" "wazuh-manager" || { err "host port 55000 is not published by a Wazuh manager service."; return 1; }
-  printf 'dashboard=%s\napi=%s\n' "$dashboard_service" "$api_service"
+  printf 'dashboard=%s
+' "$dashboard_service"
 }
-
 install_dashboard_certificate() {
   local compose_file="$1" cert_file="$2" key_file="$3" chain_file="${4:-}"
   local targets dashboard_service public_endpoint desired_fp current_fp backup_dir
@@ -714,57 +600,13 @@ install_dashboard_certificate() {
   fi
 }
 
-install_api_certificate() {
-  local compose_file="$1" cert_file="$2" key_file="$3" chain_file="${4:-}"
-  local targets api_service dashboard_service public_endpoint desired_fp current_fp backup_dir names
-  targets="$(discover_targets "$compose_file")"
-  api_service="$(sed -n 's/^api=//p' <<< "$targets")"
-  dashboard_service="$(sed -n 's/^dashboard=//p' <<< "$targets")"
-  mapfile -t names < <(api_required_names "$compose_file" "$api_service" "$dashboard_service" | awk 'NF' | sort -u)
-  if ! validate_certificate_bundle "$cert_file" "$key_file" "$chain_file" "${names[@]}"; then
-    err "The certificate does not cover all hostnames required by the Wazuh API clients."
-    err "No change was performed."
-    return 1
-  fi
-  public_endpoint="$(discover_public_endpoint "$compose_file")"
-  desired_fp="$(certificate_fingerprint "$TMP_DIR/leaf.pem")"
-  current_fp="$(served_certificate_fingerprint "$public_endpoint" 55000 || true)"
-  if [ "$current_fp" = "$desired_fp" ]; then
-    log "The requested certificate is already installed."
-    log "No change required."
-    return 0
-  fi
-  confirm "Install / replace Wazuh API certificate for $public_endpoint:55000?" || { log "No change was performed."; return 0; }
-  backup_dir="$(create_backup_dir api)"
-  if install_api_files "$compose_file" "$api_service" "$TMP_DIR/server-certificate.pem" "$key_file" "$backup_dir" &&
-     restart_target "$compose_file" "$api_service" &&
-     service_running "$compose_file" "$api_service" &&
-     verify_endpoint_tls "$public_endpoint" 55000 "$desired_fp"; then
-    log "SUCCESS: Wazuh API certificate installed."
-    log "If the new API certificate is signed by a new CA not known by the orchestrator, update wazuh_api_ca_file."
-  else
-    err "Wazuh API installation failed. Rolling back."
-    restore_api_files "$compose_file" "$backup_dir" || true
-    restart_target "$compose_file" "$api_service" || true
-    if [ -n "$current_fp" ]; then
-      verify_endpoint_tls "$public_endpoint" 55000 "$current_fp" || true
-    fi
-    return 1
-  fi
-}
-
 show_current_certificates() {
   local compose_file="$1" endpoint
   endpoint="$(discover_public_endpoint "$compose_file")"
   log "Dashboard endpoint: https://$endpoint"
   read_served_certificate "$endpoint" 443 "$TMP_DIR/dashboard-served.pem" || true
   [ -s "$TMP_DIR/dashboard-served.pem" ] && print_certificate_info "$TMP_DIR/dashboard-served.pem" || log "Dashboard certificate could not be read from $(tls_connect_target "$endpoint"):443 with SNI $endpoint."
-  log ""
-  log "Wazuh API endpoint: https://$endpoint:55000"
-  read_served_certificate "$endpoint" 55000 "$TMP_DIR/api-served.pem" || true
-  [ -s "$TMP_DIR/api-served.pem" ] && print_certificate_info "$TMP_DIR/api-served.pem" || log "API certificate could not be read from $(tls_connect_target "$endpoint"):55000 with SNI $endpoint."
 }
-
 list_backups() {
   [ -d "$BACKUP_ROOT" ] || return 0
   find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d | sort
@@ -776,20 +618,14 @@ restore_backup_menu() {
   list_backups | nl -ba
   read -r -p "Backup path to restore: " backup
   [ -d "$backup" ] || { err "backup directory not found."; return 1; }
-  confirm "Restore certificates from $backup?" || { log "No change was performed."; return 0; }
-  if [ -f "$backup/metadata/dashboard.env" ]; then
-    service="$(sed -n 's/^service=//p' "$backup/metadata/dashboard.env")"
-    restore_dashboard_files "$backup"
-    restart_target "$compose_file" "$service"
-  fi
-  if [ -f "$backup/metadata/api.env" ]; then
-    restore_api_files "$compose_file" "$backup"
-    service="$(sed -n 's/^service=//p' "$backup/metadata/api.env")"
-    restart_target "$compose_file" "$service"
-  fi
-  log "Restore completed. Run Show current certificates to verify served TLS certificates."
+  [ -f "$backup/metadata/dashboard.env" ] || { err "selected backup does not contain a Dashboard certificate backup."; return 1; }
+  confirm "Restore Dashboard certificate from $backup?" || { log "No change was performed."; return 0; }
+  service="$(sed -n 's/^service=//p' "$backup/metadata/dashboard.env")"
+  restore_dashboard_files "$backup"
+  restart_target "$compose_file" "$service"
+  service_running "$compose_file" "$service"
+  log "Restore completed. Run Show current Dashboard certificate to verify served TLS certificate."
 }
-
 prompt_certificate_inputs() {
   CERT_INPUT=""
   KEY_INPUT=""
@@ -797,27 +633,6 @@ prompt_certificate_inputs() {
   read -r -p "Path to certificate or fullchain PEM file: " CERT_INPUT
   read -r -p "Path to private key PEM file: " KEY_INPUT
   read -r -p "Path to intermediate chain PEM file (optional, press Enter to skip): " CHAIN_INPUT
-}
-
-install_same_certificate() {
-  local compose_file="$1"
-  local targets api_service dashboard_service
-  local -a names
-  prompt_certificate_inputs
-  targets="$(discover_targets "$compose_file")"
-  api_service="$(sed -n 's/^api=//p' <<< "$targets")"
-  dashboard_service="$(sed -n 's/^dashboard=//p' <<< "$targets")"
-  mapfile -t names < <({ dashboard_required_names "$compose_file"; api_required_names "$compose_file" "$api_service" "$dashboard_service"; } | awk 'NF' | sort -u)
-  validate_certificate_bundle "$CERT_INPUT" "$KEY_INPUT" "$CHAIN_INPUT" "${names[@]}" || {
-    err "The certificate does not cover all hostnames required by the Dashboard and Wazuh API clients."
-    err "No change was performed."
-    return 1
-  }
-  log "Warning:"
-  log "The same certificate/private key will be deployed to multiple services."
-  confirm "Continue with Dashboard + API deployment?" || { log "No change was performed."; return 0; }
-  install_dashboard_certificate "$compose_file" "$CERT_INPUT" "$KEY_INPUT" "$CHAIN_INPUT"
-  install_api_certificate "$compose_file" "$CERT_INPUT" "$KEY_INPUT" "$CHAIN_INPUT"
 }
 
 main_menu() {
@@ -837,21 +652,17 @@ main_menu() {
     log " Easy-Wazuh TLS certificate installer"
     log "=================================================="
     log ""
-    log "1) Show current certificates"
+    log "1) Show current Dashboard certificate"
     log "2) Install / replace Dashboard certificate"
-    log "3) Install / replace Wazuh API certificate"
-    log "4) Install the same certificate on Dashboard + API"
-    log "5) Restore previous certificates"
-    log "6) Exit"
-    read -r -p "Choose an option [1-6]: " choice
+    log "3) Restore previous Dashboard certificate"
+    log "4) Exit"
+    read -r -p "Choose an option [1-4]: " choice
     case "$choice" in
       1) show_current_certificates "$compose_file" ;;
       2) prompt_certificate_inputs; install_dashboard_certificate "$compose_file" "$CERT_INPUT" "$KEY_INPUT" "$CHAIN_INPUT" ;;
-      3) prompt_certificate_inputs; install_api_certificate "$compose_file" "$CERT_INPUT" "$KEY_INPUT" "$CHAIN_INPUT" ;;
-      4) install_same_certificate "$compose_file" ;;
-      5) restore_backup_menu "$compose_file" ;;
-      6) exit 0 ;;
-      *) log "Please enter 1, 2, 3, 4, 5 or 6." ;;
+      3) restore_backup_menu "$compose_file" ;;
+      4) exit 0 ;;
+      *) log "Please enter 1, 2, 3 or 4." ;;
     esac
     log ""
   done
