@@ -415,3 +415,19 @@ def test_static_no_internal_pki_or_filebeat_targets():
     assert "filebeat" not in text.lower()
     assert "docker compose down" not in text
     assert "docker volume" not in text
+
+
+def test_served_certificate_uses_local_connect_host_with_public_sni(tmp_path: Path):
+    script = '''
+      make_tmp_dir
+      timeout() {
+        shift
+        printf '%s\n' "$*" > "$TMP_DIR/openssl-command.txt"
+        printf '%s\n' '-----BEGIN CERTIFICATE-----' 'MIIB' '-----END CERTIFICATE-----'
+      }
+      certificate_fingerprint() { cat "$TMP_DIR/openssl-command.txt"; }
+      served_certificate_fingerprint wazuh.home.lan 443
+    '''
+    result = bash(script, tmp_path)
+    assert "-connect 127.0.0.1:443" in result.stdout
+    assert "-servername wazuh.home.lan" in result.stdout

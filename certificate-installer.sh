@@ -8,6 +8,7 @@ EASY_WAZUH_DOCKER_ROOT="${EASY_WAZUH_DOCKER_ROOT:-$EASY_WAZUH_ROOT/wazuh-docker}
 EASY_WAZUH_METADATA="${EASY_WAZUH_METADATA:-$EASY_WAZUH_ROOT/easy-wazuh/deployment.yaml}"
 BACKUP_ROOT="${BACKUP_ROOT:-$EASY_WAZUH_ROOT/backups/certificates}"
 TLS_TIMEOUT_SECONDS="${TLS_TIMEOUT_SECONDS:-20}"
+TLS_CONNECT_HOST="${TLS_CONNECT_HOST:-127.0.0.1}"
 TESTING="${EASY_WAZUH_CERT_INSTALLER_TESTING:-no}"
 TMP_DIR=""
 
@@ -236,13 +237,28 @@ certificate_fingerprint() {
   openssl x509 -in "$1" -noout -fingerprint -sha256 | sed 's/^sha256 Fingerprint=//;s/^SHA256 Fingerprint=//'
 }
 
+tls_connect_target() {
+  local host="$1"
+  if is_ip_address "$host"; then
+    printf '%s\n' "$host"
+  else
+    printf '%s\n' "$TLS_CONNECT_HOST"
+  fi
+}
+
+read_served_certificate() {
+  local host="$1" port="$2" output="$3" connect_host
+  connect_host="$(tls_connect_target "$host")"
+  timeout "$TLS_TIMEOUT_SECONDS" openssl s_client -connect "$connect_host:$port" -servername "$host" -showcerts </dev/null 2>/dev/null |
+    awk '/-----BEGIN CERTIFICATE-----/{p=1} p{print} /-----END CERTIFICATE-----/{exit}' > "$output"
+  [ -s "$output" ]
+}
+
 served_certificate_fingerprint() {
   local host="$1" port="$2" tmp
   make_tmp_dir
   tmp="$TMP_DIR/served-$port.pem"
-  timeout "$TLS_TIMEOUT_SECONDS" openssl s_client -connect "$host:$port" -servername "$host" -showcerts </dev/null 2>/dev/null |
-    awk '/-----BEGIN CERTIFICATE-----/{p=1} p{print} /-----END CERTIFICATE-----/{exit}' > "$tmp"
-  [ -s "$tmp" ] || return 1
+  read_served_certificate "$host" "$port" "$tmp" || return 1
   certificate_fingerprint "$tmp"
 }
 
@@ -593,9 +609,7 @@ verify_endpoint_tls() {
   local served cert_file
   make_tmp_dir
   cert_file="$TMP_DIR/verify-$port.pem"
-  timeout "$TLS_TIMEOUT_SECONDS" openssl s_client -connect "$host:$port" -servername "$host" -showcerts </dev/null 2>/dev/null |
-    awk '/-----BEGIN CERTIFICATE-----/{p=1} p{print} /-----END CERTIFICATE-----/{exit}' > "$cert_file"
-  [ -s "$cert_file" ] || { err "TLS handshake failed on $host:$port"; return 1; }
+  read_served_certificate "$host" "$port" "$cert_file" || { err "TLS handshake failed on $host:$port via $(tls_connect_target "$host")"; return 1; }
   served="$(certificate_fingerprint "$cert_file")"
   [ "$served" = "$expected_fingerprint" ] || { err "served certificate fingerprint does not match expected certificate."; return 1; }
   validate_hostname_coverage "$cert_file" "$host" || return 1
@@ -716,14 +730,12 @@ show_current_certificates() {
   local compose_file="$1" endpoint
   endpoint="$(discover_public_endpoint "$compose_file")"
   log "Dashboard endpoint: https://$endpoint"
-  timeout "$TLS_TIMEOUT_SECONDS" openssl s_client -connect "$endpoint:443" -servername "$endpoint" -showcerts </dev/null 2>/dev/null |
-    awk '/-----BEGIN CERTIFICATE-----/{p=1} p{print} /-----END CERTIFICATE-----/{exit}' > "${TMP_DIR:-/tmp}/dashboard-served.pem" || true
-  [ -s "${TMP_DIR:-/tmp}/dashboard-served.pem" ] && print_certificate_info "${TMP_DIR:-/tmp}/dashboard-served.pem" || log "Dashboard certificate could not be read."
+  read_served_certificate "$endpoint" 443 "$TMP_DIR/dashboard-served.pem" || true
+  [ -s "$TMP_DIR/dashboard-served.pem" ] && print_certificate_info "$TMP_DIR/dashboard-served.pem" || log "Dashboard certificate could not be read from $(tls_connect_target "$endpoint"):443 with SNI $endpoint."
   log ""
   log "Wazuh API endpoint: https://$endpoint:55000"
-  timeout "$TLS_TIMEOUT_SECONDS" openssl s_client -connect "$endpoint:55000" -servername "$endpoint" -showcerts </dev/null 2>/dev/null |
-    awk '/-----BEGIN CERTIFICATE-----/{p=1} p{print} /-----END CERTIFICATE-----/{exit}' > "${TMP_DIR:-/tmp}/api-served.pem" || true
-  [ -s "${TMP_DIR:-/tmp}/api-served.pem" ] && print_certificate_info "${TMP_DIR:-/tmp}/api-served.pem" || log "API certificate could not be read."
+  read_served_certificate "$endpoint" 55000 "$TMP_DIR/api-served.pem" || true
+  [ -s "$TMP_DIR/api-served.pem" ] && print_certificate_info "$TMP_DIR/api-served.pem" || log "API certificate could not be read from $(tls_connect_target "$endpoint"):55000 with SNI $endpoint."
 }
 
 list_backups() {
