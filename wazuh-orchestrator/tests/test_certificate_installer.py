@@ -439,3 +439,30 @@ def test_certificate_input_prompts_ask_for_file_paths():
     assert "Path to certificate or fullchain PEM file:" in text
     assert "Path to private key PEM file:" in text
     assert "Path to intermediate chain PEM file (optional, press Enter to skip):" in text
+
+
+def test_service_running_uses_bounded_wait_loop():
+    text = INSTALLER.read_text(encoding="utf-8")
+    assert 'SERVICE_WAIT_SECONDS="${SERVICE_WAIT_SECONDS:-120}"' in text
+    assert 'service $service did not reach running state within ${SERVICE_WAIT_SECONDS}s.' in text
+    assert 'sleep 2' in text
+
+
+def test_dashboard_rollback_skips_previous_tls_verify_when_no_previous_fingerprint(tmp_path: Path):
+    compose = make_compose(tmp_path)
+    certs = compose.parent / "config" / "wazuh_indexer_ssl_certs"
+    current_cert, current_key = make_cert(tmp_path, "current-empty-fp", ["wazuh.home.lan"])
+    target_cert = certs / "wazuh.dashboard.pem"
+    target_key = certs / "wazuh.dashboard-key.pem"
+    target_cert.write_text(current_cert.read_text(encoding="utf-8"), encoding="utf-8")
+    target_key.write_text(current_key.read_text(encoding="utf-8"), encoding="utf-8")
+    new_cert, new_key = make_cert(tmp_path, "new-empty-fp", ["wazuh.home.lan"])
+    script = f'''
+      served_certificate_fingerprint() {{ return 1; }}
+      confirm() {{ return 0; }}
+      restart_target() {{ return 1; }}
+      verify_endpoint_tls() {{ if [ -z "$3" ]; then echo "empty verify called"; return 1; fi; }}
+      install_dashboard_certificate "{compose}" "{new_cert}" "{new_key}" "" || true
+    '''
+    result = bash(script, tmp_path)
+    assert "empty verify called" not in result.stdout

@@ -9,6 +9,7 @@ EASY_WAZUH_METADATA="${EASY_WAZUH_METADATA:-$EASY_WAZUH_ROOT/easy-wazuh/deployme
 BACKUP_ROOT="${BACKUP_ROOT:-$EASY_WAZUH_ROOT/backups/certificates}"
 TLS_TIMEOUT_SECONDS="${TLS_TIMEOUT_SECONDS:-20}"
 TLS_CONNECT_HOST="${TLS_CONNECT_HOST:-127.0.0.1}"
+SERVICE_WAIT_SECONDS="${SERVICE_WAIT_SECONDS:-120}"
 TESTING="${EASY_WAZUH_CERT_INSTALLER_TESTING:-no}"
 TMP_DIR=""
 
@@ -600,19 +601,41 @@ restart_target() {
 }
 
 service_running() {
-  local compose_file="$1" service="$2"
-  compose_cmd "$compose_file" ps --status running -q "$service" | grep -q .
+  local compose_file="$1" service="$2" deadline
+  deadline=$(($(date +%s) + SERVICE_WAIT_SECONDS))
+  while true; do
+    if compose_cmd "$compose_file" ps --status running -q "$service" | grep -q .; then
+      return 0
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      err "service $service did not reach running state within ${SERVICE_WAIT_SECONDS}s."
+      return 1
+    fi
+    sleep 2
+  done
 }
 
 verify_endpoint_tls() {
   local host="$1" port="$2" expected_fingerprint="$3"
-  local served cert_file
+  local served cert_file deadline last_error
   make_tmp_dir
   cert_file="$TMP_DIR/verify-$port.pem"
-  read_served_certificate "$host" "$port" "$cert_file" || { err "TLS handshake failed on $host:$port via $(tls_connect_target "$host")"; return 1; }
-  served="$(certificate_fingerprint "$cert_file")"
-  [ "$served" = "$expected_fingerprint" ] || { err "served certificate fingerprint does not match expected certificate."; return 1; }
-  validate_hostname_coverage "$cert_file" "$host" || return 1
+  deadline=$(($(date +%s) + SERVICE_WAIT_SECONDS))
+  last_error="TLS handshake failed"
+  while true; do
+    if read_served_certificate "$host" "$port" "$cert_file"; then
+      served="$(certificate_fingerprint "$cert_file")"
+      if [ "$served" = "$expected_fingerprint" ] && validate_hostname_coverage "$cert_file" "$host"; then
+        return 0
+      fi
+      last_error="served certificate fingerprint or hostname did not match expected certificate"
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      err "$last_error on $host:$port via $(tls_connect_target "$host") within ${SERVICE_WAIT_SECONDS}s."
+      return 1
+    fi
+    sleep 2
+  done
 }
 
 dashboard_required_names() {
@@ -684,7 +707,9 @@ install_dashboard_certificate() {
     err "Dashboard installation failed. Rolling back."
     restore_dashboard_files "$backup_dir" || true
     restart_target "$compose_file" "$dashboard_service" || true
-    verify_endpoint_tls "$public_endpoint" 443 "$current_fp" || true
+    if [ -n "$current_fp" ]; then
+      verify_endpoint_tls "$public_endpoint" 443 "$current_fp" || true
+    fi
     return 1
   fi
 }
@@ -721,7 +746,9 @@ install_api_certificate() {
     err "Wazuh API installation failed. Rolling back."
     restore_api_files "$compose_file" "$backup_dir" || true
     restart_target "$compose_file" "$api_service" || true
-    verify_endpoint_tls "$public_endpoint" 55000 "$current_fp" || true
+    if [ -n "$current_fp" ]; then
+      verify_endpoint_tls "$public_endpoint" 55000 "$current_fp" || true
+    fi
     return 1
   fi
 }
